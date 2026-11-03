@@ -1015,5 +1015,238 @@ document.getElementById('backupInput').addEventListener('change', async (e)=>{
 
 rebuildFilters(); renderMesesList(); renderResumo(); renderLista();
 </script>
+  <script>
+(function () {
+  const firebaseConfig = {
+    apiKey: "AIzaSyB-tkzEBC2TqbKqWnMpfoV7qJ8Hdlp0Xsg",
+    authDomain: "gestao-os-3f35a.firebaseapp.com",
+    projectId: "gestao-os-3f35a",
+    storageBucket: "gestao-os-3f35a.firebasestorage.app",
+    messagingSenderId: "460466198343",
+    appId: "1:460466198343:web:5a6d975a5765b65d4a9e62"
+  };
+
+  const UID = "2NEuZgcA6AVNHfFcQACffVn8ZIh1";
+  const KEY = "os_gestao_meses_v2";
+  let auth, db, currentUser, syncTimer;
+
+  const painel = document.createElement("div");
+  painel.style.cssText =
+    "position:fixed;right:15px;bottom:15px;z-index:99999;" +
+    "background:#1e293b;color:white;padding:16px;border-radius:12px;" +
+    "border:1px solid #475569;width:300px;box-shadow:0 5px 25px #0008";
+
+  painel.innerHTML = `
+    <strong>☁️ Sincronização Firebase</strong>
+    <form id="fbForm" style="margin-top:12px">
+      <input id="fbEmail" type="email" placeholder="Seu e-mail"
+        required style="width:100%;padding:10px;margin-bottom:8px">
+      <input id="fbPassword" type="password" placeholder="Sua senha"
+        required style="width:100%;padding:10px;margin-bottom:8px">
+      <button style="width:100%;padding:10px;background:#2563eb;
+        color:white;border:0;border-radius:6px;cursor:pointer">
+        Entrar e sincronizar
+      </button>
+    </form>
+    <div id="fbStatus" style="font-size:12px;margin-top:10px">
+      Preparando conexão...
+    </div>
+    <button id="fbLogout" style="display:none;margin-top:10px">
+      Sair da conta
+    </button>
+  `;
+
+  document.body.appendChild(painel);
+
+  const status = document.getElementById("fbStatus");
+  const form = document.getElementById("fbForm");
+  const logout = document.getElementById("fbLogout");
+
+  function carregarScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("Falha ao carregar Firebase."));
+      document.head.appendChild(s);
+    });
+  }
+
+  function lerLocal() {
+    try {
+      return JSON.parse(localStorage.getItem(KEY) || "{}");
+    } catch (_) {
+      return {};
+    }
+  }
+
+  async function sincronizar() {
+    const local = lerLocal();
+    const colecao = db.collection("meses");
+    const snapshot = await colecao.get();
+
+    const batch = db.batch();
+    let operacoes = 0;
+
+    snapshot.forEach(doc => {
+      if (!local[doc.id]) {
+        batch.delete(doc.ref);
+        operacoes++;
+      }
+    });
+
+    Object.keys(local).forEach(id => {
+      const mes = local[id];
+      const dados = {
+        label: mes.label || id,
+        data: mes.data,
+        resumo: mes.resumo || [],
+        embedded: false,
+        atualizadoEm: firebase.firestore.FieldValue.serverTimestamp()
+      };
+
+      const tamanho = new TextEncoder()
+        .encode(JSON.stringify(dados)).length;
+
+      if (tamanho > 900000) {
+        throw new Error("O mês " + id +
+          " é grande demais para um único documento.");
+      }
+
+      batch.set(colecao.doc(id), dados);
+      operacoes++;
+    });
+
+    if (operacoes > 450) {
+      throw new Error("Quantidade de documentos excede o limite seguro.");
+    }
+
+    if (operacoes) await batch.commit();
+
+    status.textContent =
+      "✓ Sincronização concluída. " +
+      Object.keys(local).length + " mês(es) na nuvem.";
+
+    if (typeof renderMesesList === "function") {
+      renderMesesList();
+    }
+  }
+
+  function agendarSincronizacao() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      sincronizar().catch(err => {
+        status.textContent = "Erro ao sincronizar: " + err.message;
+      });
+    }, 1000);
+  }
+
+  const setOriginal = Storage.prototype.setItem;
+
+  Storage.prototype.setItem = function (key, value) {
+    setOriginal.call(this, key, value);
+
+    if (this === localStorage && key === KEY && currentUser) {
+      agendarSincronizacao();
+    }
+  };
+
+  async function iniciar() {
+    await carregarScript(
+      "https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"
+    );
+    await carregarScript(
+      "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"
+    );
+    await carregarScript(
+      "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"
+    );
+
+    firebase.initializeApp(firebaseConfig);
+    auth = firebase.auth();
+    db = firebase.firestore();
+
+    status.textContent = "Firebase carregado. Faça seu login.";
+
+    form.addEventListener("submit", async e => {
+      e.preventDefault();
+      status.textContent = "Verificando acesso...";
+
+      try {
+        await auth.signInWithEmailAndPassword(
+          document.getElementById("fbEmail").value.trim(),
+          document.getElementById("fbPassword").value
+        );
+      } catch (err) {
+        status.textContent = "Falha no login: " + err.message;
+      }
+    });
+
+    logout.addEventListener("click", () => auth.signOut());
+
+    auth.onAuthStateChanged(async user => {
+      if (!user) {
+        currentUser = null;
+        form.style.display = "block";
+        logout.style.display = "none";
+        status.textContent = "Entre com sua conta para sincronizar.";
+        return;
+      }
+
+      if (user.uid !== UID) {
+        await auth.signOut();
+        status.textContent = "Conta diferente da autorizada.";
+        return;
+      }
+
+      currentUser = user;
+      form.style.display = "none";
+      logout.style.display = "block";
+      status.textContent = "Conectado. Buscando meses na nuvem...";
+
+      try {
+        const snapshot = await db.collection("meses").get();
+        const nuvem = {};
+
+        snapshot.forEach(doc => {
+          const m = doc.data();
+          nuvem[doc.id] = {
+            label: m.label,
+            data: m.data,
+            resumo: m.resumo || [],
+            embedded: false
+          };
+        });
+
+        // Preserva os meses locais e acrescenta os meses da nuvem.
+        // Em caso de mês repetido, a versão da nuvem prevalece.
+        const mesclado = Object.assign({}, lerLocal(), nuvem);
+
+        setOriginal.call(
+          localStorage,
+          KEY,
+          JSON.stringify(mesclado)
+        );
+
+        await sincronizar();
+
+        if (typeof rebuildFilters === "function") {
+          rebuildFilters();
+          renderMesesList();
+          renderResumo();
+          renderLista();
+        }
+
+      } catch (err) {
+        status.textContent = "Erro na sincronização: " + err.message;
+      }
+    });
+  }
+
+  iniciar().catch(err => {
+    status.textContent = "Erro ao iniciar Firebase: " + err.message;
+  });
+})();
+</script>
 </body>
 </html>
